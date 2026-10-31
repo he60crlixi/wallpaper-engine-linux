@@ -1,8 +1,41 @@
 # Wallpaper Engine on Linux
 
-让 Wallpaper Engine 在 Linux（Proton/Wine）下正常启动，并让「打开文件夹」「双击视频」能调用主机的文件管理器和播放器。
+让 Wallpaper Engine 在 Linux（Proton/Wine）下**能启动、能浏览壁纸库、能看视频**，
+并让「打开文件夹」「双击视频」调用主机的文件管理器和播放器。
+
+> **这不是完整适配。** 壁纸渲染功能在 Wayland 下**用不了**（详见下方能力边界）。
+> 本方案的目标是：把 WE 当成一个「壁纸/视频浏览器」来用，而不是让它接管桌面。
 
 面向人类阅读，也面向 agent 自动化执行。
+
+---
+
+## 能力边界（先看这个）
+
+| 功能 | 状态 | 说明 |
+|---|---|---|
+| 启动程序 | ✅ | 修好 prefix 后正常 |
+| 打开主界面 | ✅ | 浏览创意工坊、预览图 |
+| 点「打开文件夹」 | ✅ | 弹出主机文件管理器 |
+| 双击视频文件 | ✅ | 用主机播放器（mpv 等）播放 |
+| 应用壁纸到桌面 | ❌ | **Wayland 下不可用** |
+| 壁纸实时渲染预览 | ❌ | 同上 |
+
+**为什么壁纸功能不行**：WE 依赖 Windows DWM 桌面合成器，把渲染窗口塞到桌面图标层
+**下面**。Wayland 没有这个层，XWayland 是 `-rootless` 模式，没有「桌面」可挂载。
+WE 会卡在初始化抛 `COMException`，壁纸永远出不来。
+
+这是原理性限制，不是配置问题，**改配置绕不过去**。
+
+如果你要的是「Linux 桌面动态壁纸」，用原生方案：
+
+| 工具 | 说明 |
+|---|---|
+| `swww` | Wayland 壁纸守护进程，支持 GIF/视频 |
+| `mpvpaper` | 用 mpv 播放视频当壁纸 |
+| `hyprpaper` | Hyprland 专用 |
+
+这些不读 Steam 创意工坊，素材要另外找。
 
 ---
 
@@ -218,33 +251,6 @@ grep -a "mp4file" "$PREFIX/system.reg"
 ### `wine start` 报 `ShellExecuteEx 失败`
 
 Wine 的 `ShellExecuteExW` 在部分 prefix 下整体失效（连 `notepad.exe` 都启动不了）。这是 Wine 自身的问题，改注册表绕不过去——这也是为什么要替换 `explorer.exe` 而不是只改关联。
-
----
-
-## 为什么壁纸功能本身在 Wayland 下不行
-
-Wallpaper Engine 靠 Windows 的 DWM 桌面合成器把渲染窗口塞到桌面图标层**下面**。
-
-Wayland 下没有这个概念，XWayland 是 `-rootless` 模式，没有「桌面」层可以挂载。所以壁纸渲染会卡在初始化，抛：
-
-```
-System.Runtime.InteropServices.COMException
-```
-
-**但界面（`wallpaperui.exe`）是独立进程**，用的是 CEF，能正常工作。所以：
-
-- ✅ 能浏览壁纸库、看预览、打开文件夹、播放视频
-- ❌ 不能真的把壁纸贴到桌面
-
-想在 Wayland 下要动态壁纸，用原生方案：
-
-| 工具 | 说明 |
-|---|---|
-| `swww` | Wayland 壁纸守护进程，支持 GIF/视频 |
-| `mpvpaper` | 用 mpv 播放视频当壁纸 |
-| `hyprpaper` | Hyprland 专用 |
-
-这些不读 Steam 创意工坊，需要另找素材。
 
 ---
 
