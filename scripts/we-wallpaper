@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+#
+# we-wallpaper — 在 niri / sway / Hyprland 上用 linux-wallpaperengine 挂 WE 壁纸
+#
+# 用法:
+#   we-wallpaper              列出所有可用壁纸（▶ 标记当前）
+#   we-wallpaper <ID>         切换到这个壁纸
+#   we-wallpaper stop         停止
+#   we-wallpaper current      显示当前壁纸
+#   we-wallpaper next         随机换一个
+#
+# 环境变量（也可直接改下面的默认值）:
+#   WE_ASSETS   WE 的 assets 目录（必填，通常 <游戏目录>/assets）
+#   WORKSHOP    创意工坊目录（通常 <Steam库>/steamapps/workshop/content/431960）
+#   WE_OUTPUT   显示器名（niri msg outputs 查，如 eDP-2 / HDMI-A-1）
+#   WE_FPS      帧率上限，默认 30
+#
+set -uo pipefail
+
+APPID=431960
+
+# ---------------------------------------------------------------- 自动探测路径
+
+detect_paths() {
+    local we_dir
+    # 先找游戏目录
+    we_dir=$(find /mnt "$HOME/.local/share/Steam" "$HOME/.steam" \
+                  -maxdepth 6 -type d -name wallpaper_engine 2>/dev/null | head -1)
+
+    if [ -z "$we_dir" ]; then
+        echo "错误: 找不到 Wallpaper Engine 安装目录" >&2
+        echo "请设置 WE_ASSETS 环境变量，例如：" >&2
+        echo "  export WE_ASSETS=/mnt/data/SteamLibrary/steamapps/common/wallpaper_engine/assets" >&2
+        exit 1
+    fi
+
+    : "${WE_ASSETS:=$we_dir/assets}"
+
+    # 创意工坊目录：从游戏目录往上推两级 steamapps
+    local steamapps
+    steamapps=$(dirname "$(dirname "$we_dir")")
+    : "${WORKSHOP:=$steamapps/workshop/content/$APPID}"
+
+    # 显示器：从 niri 自动取第一个
+    if [ -z "${WE_OUTPUT:-}" ]; then
+        if command -v niri >/dev/null 2>&1; then
+            WE_OUTPUT=$(niri msg outputs 2>/dev/null \
+                        | grep -oP '\(\K[^)]+(?=\)$)' | head -1)
+        fi
+        : "${WE_OUTPUT:=eDP-1}"
+    fi
+}
+
+detect_paths
+FPS="${WE_FPS:-30}"
+STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/we-wallpaper.current"
+LOG_FILE="${XDG_RUNTIME_DIR:-/tmp}/we-wallpaper.log"
+
+# ---------------------------------------------------------------- 进程管理
+
+# 注意：不要用 pkill -f，它会匹配到本脚本自己的命令行导致自杀。
+# 用 ps + grep -F 精确定位。
+find_proc() {
+    ps -eo pid,args 2>/dev/null \
+        | grep -F "linux-wallpaperengine" \
+        | grep -F -- "--bg $WORKSHOP" \
+        | grep -v grep \
+        | awk '{print $1}' | head -1
+}
+
+stop_all() {
+    local p
+    p=$(find_proc)
+    if [ -n "$p" ]; then
+        kill -TERM "$p" 2>/dev/null
+        sleep 1
+        kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null
+        echo "已停止 (PID $p)"
+    else
+        echo "没有正在运行的壁纸"
+    fi
+    rm -f "$STATE_FILE"
+}
+
+# ---------------------------------------------------------------- 壁纸列表
+
+list_wallpapers() {
+    if [ ! -d "$WORKSHOP" ]; then
+        echo "错误: 创意工坊目录不存在: $WORKSHOP" >&2
+        exit 1
+    fi
+
+    local cur=""
+    [ -f "$STATE_FILE" ] && cur=$(cat "$STATE_FILE")
+
+    python3 - "$WORKSHOP" "$cur" <<'PY'
+import json, os, sys
+
+base, current = sys.argv[1], sys.argv[2]
+rows = []
+
+for d in sorted(os.listdir(base)):
+    pj = os.path.join(base, d, 'project.json')
+    if not os.path.exists(pj):
+        continue
+    try:
+        j = json.load(open(pj, encoding='utf-8', errors='replace'))
+    except Exception:
+        continue
+    rows.append((j.get('type', '?'), d, j.get('title', '(无标题)')))
+
+order = {'scene': 0, 'video': 1, 'web': 2}
+rows.sort(key=lambda r: (order.get(r[0], 9), r[2]))
+
+print(f"{'':1}{'类型':<7}{'ID':<13}标题")
+print("-" * 72)
+for t, d, title in rows:
+    mark = '▶' if d == current else ' '
+    note = '  [省CPU]' if t == 'scene' else ('  [吃CPU]' if t == 'video' else '')
+    print(f"{mark}{t:<7}{d:<13}{title[:40]}{note}")
+
+scenes = sum(1 for t, _, _ in rows if t == 'scene')
+videos = sum(1 for t, _, _ in rows if t == 'video')
+print(f"\n共 {len(rows)} 个（scene {scenes} / video {videos}）")
+print("提示: scene 类型 CPU 占用远低于 video")
+PY
+}
+
+get_title() {
+    python3 -c "
+import json,sys
+try: print(json.load(open(sys.argv[1],encoding='utf-8',errors='replace')).get('title',''))
+except Exception: print('')
+" "$WORKSHOP/$1/project.json" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- 启动
+
+start_wallpaper() {
+    local id="$1"
+    local dir="$WORKSHOP/$id"
+
+    if [ ! -d "$dir" ]; then
+        echo "找不到壁纸: $id" >&2
+        echo "运行 '$0' 查看可用 ID" >&2
+        return 1
+    fi
+
+    if ! command -v linux-wallpaperengine >/dev/null 2>&1; then
+        echo "未安装 linux-wallpaperengine" >&2
+        echo "  Arch:   yay -S linux-wallpaperengine-git" >&2
+        echo "  源码:   https://github.com/Almamu/linux-wallpaperengine" >&2
+        return 1
+    fi
+
+    stop_all >/dev/null 2>&1
+
+    # setsid + disown: 脱离当前 shell，关终端不影响
+    setsid linux-wallpaperengine \
+        --assets-dir "$WE_ASSETS" \
+        --screen-root "$WE_OUTPUT" \
+        --layer background \
+        --bg "$dir" \
+        --silent \
+        --fps "$FPS" \
+        --hwdec no \
+        > "$LOG_FILE" 2>&1 < /dev/null &
+    disown
+
+    sleep 2
+    local p
+    p=$(find_proc)
+    if [ -n "$p" ]; then
+        echo "$id" > "$STATE_FILE"
+        echo "已切换: $id  $(get_title "$id")  (PID $p)"
+        return 0
+    else
+        echo "启动失败，日志:" >&2
+        echo "  $LOG_FILE" >&2
+        tail -8 "$LOG_FILE" 2>/dev/null | sed 's/^/  /' >&2
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------- 主逻辑
+
+case "${1:-list}" in
+    list|ls)
+        list_wallpapers
+        ;;
+    stop)
+        stop_all
+        ;;
+    current)
+        if [ -f "$STATE_FILE" ]; then
+            id=$(cat "$STATE_FILE")
+            echo "$id  $(get_title "$id")"
+        else
+            echo "未设置"
+        fi
+        ;;
+    next)
+        id=$(python3 -c "
+import json,os,random,sys
+base=sys.argv[1]
+ids=[d for d in os.listdir(base) if os.path.exists(os.path.join(base,d,'project.json'))]
+print(random.choice(ids) if ids else '')
+" "$WORKSHOP")
+        [ -n "$id" ] && start_wallpaper "$id"
+        ;;
+    -h|--help|help)
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)
+        start_wallpaper "$1"
+        ;;
+esac

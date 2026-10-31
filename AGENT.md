@@ -2,78 +2,127 @@
 
 本文件面向 AI agent。人类请看 [README.md](README.md)。
 
-## 任务目标
+## 任务识别
 
-在 Linux 上让 Wallpaper Engine（Steam appid `431960`）能启动、能浏览壁纸库、
-能看视频，并让界面里的「打开文件夹」「双击视频」调用主机的文件管理器和播放器。
+先判断用户要什么，两条路线完全不同：
 
-## 能力边界（务必向用户说明）
+| 用户诉求 | 路线 | 文档 |
+|---|---|---|
+| 「壁纸显示不出来」「桌面没有壁纸」 | **A：原生渲染** | [docs/NIRI-WALLPAPER.md](docs/NIRI-WALLPAPER.md) |
+| 「WE 启动不了」「点了没反应」「打不开文件夹」 | **B：Wine 修复** | 本文件下方 |
+| 「想用 WE 界面管理创意工坊」 | B | 本文件下方 |
 
-| 功能 | 可行 |
-|---|---|
-| 启动、打开主界面 | ✅ |
-| 浏览创意工坊、看预览 | ✅ |
-| 「打开文件夹」弹主机文件管理器 | ✅ |
-| 双击视频用主机播放器播放 | ✅ |
-| **把壁纸应用到桌面** | ❌ **Wayland 下不可能** |
+**关键**：如果用户抱怨壁纸不显示，**不要**尝试修复 Wine 里的 WE——
+原理上做不到。直接引导到路线 A。
 
-**不要向用户承诺壁纸能用。** WE 依赖 Windows DWM 桌面层，Wayland 没有该层
-（XWayland 是 rootless），会卡在 `COMException`。这是原理性限制。
+## 路线 A：原生渲染壁纸（最快见效）
 
-用户若需要动态壁纸，引导到原生方案：`swww` / `mpvpaper` / `hyprpaper`。
-
-**不要**因为壁纸不能用就判定任务失败 —— 用户的实际诉求往往是「用 WE 浏览和看视频」。
-
-## 关键约束
-
-1. **不要**假设用户环境与本仓库作者一致。先跑诊断，再动手。
-2. **不要**直接 `rm -rf` NTFS 上的 compatdata —— 里面含 Windows reparse point，
-   删除会报 `Input/output error`。用 `mv` 改名挪开。
-3. **不要**用 `regedit /S` 写注册表。Proton prefix 下它会**静默失败**
-   （exit 0 但没写入）。直接追加到 `system.reg` 文本文件。
-4. **不要**改 Proton 安装目录里的文件。只改 `compatdata/<appid>/pfx/` 内的副本。
-5. 替换 `explorer.exe` 前**必须**用 `cp -P` 备份（原文件是符号链接）。
-
-## 执行顺序
-
-### 第 1 步：诊断
+### 一句话方案
 
 ```bash
-./scripts/diagnose.sh
+yay -S linux-wallpaperengine-git
+
+linux-wallpaperengine \
+  --assets-dir <WE游戏目录>/assets \
+  --screen-root <显示器名> \
+  --layer background \
+  --bg <创意工坊>/<壁纸ID> \
+  --silent --fps 30 --hwdec no
 ```
 
-读取输出，判断属于哪个问题：
+### 三个必踩的坑
 
-| 诊断信号 | 问题 | 章节 |
-|---|---|---|
-| `compatdata` 在 `fuseblk`/`ntfs`/`ntfs3` | A：prefix 建不出来 | 问题 A |
-| `dosdevices/c: 缺失或损坏` | A | 问题 A |
-| `仍是原版 Wine explorer.exe` | B：不转发主机 | 问题 B |
-| `ShellExecuteEx 失败` / `wine start` 全失败 | B（Wine 缺陷，改关联无效） | 问题 B |
-| 有 `wallpaper64.exe` 但无 `wallpaperui.exe` | 卡在壁纸渲染 | 界面未显示 |
-| `Wallpaper UI` 窗口存在但用户说看不见 | 平铺合成器挤压 | 界面未显示 |
+1. **`--assets-dir` 必须给**
+   默认找 `/opt/linux-wallpaperengine/assets`，Steam 版在游戏目录里。不给就启动即退出。
 
-### 第 2 步：修问题 A（prefix 文件系统）
+2. **`--layer background` 必须给**
+   默认 `bottom` 层，在 niri 上会被克隆到每个工作区，总览界面里一片重复。
+   配合 niri 的 `layer-rule { place-within-backdrop true }`。
 
-仅当 prefix 位于 NTFS/FAT 时执行。
+3. **`--hwdec no` 通常必须给**
+   壁纸在 NTFS 上时硬解会报：
+   ```
+   filesystem error: The specified mount cannot be handled by
+   any of the filesystem adapters
+   ```
+   这是 ntfs-3g 的限制，不是配置问题。
+
+### 不要装 niri-wallpaperengine-git
+
+那个包的 niri 补丁已经过期，构建必失败：
+
+```
+patch unexpectedly ends in middle of line
+Hunk #1 FAILED at 116.
+```
+
+用上游 `linux-wallpaperengine-git`，它已内置 layer-shell 支持。
+
+### 路径探测
 
 ```bash
-LIB=<游戏库路径>/steamapps
-EXT4=$HOME/.local/share/Steam/steamapps   # 确认在 ext4 上
-findmnt -no FSTYPE -T "$EXT4"             # 必须是 ext4/btrfs/xfs
+WE_DIR=$(find /mnt "$HOME/.local/share/Steam" -maxdepth 6 \
+         -type d -name wallpaper_engine 2>/dev/null | head -1)
+ASSETS="$WE_DIR/assets"
+WORKSHOP=$(dirname "$(dirname "$WE_DIR")")/workshop/content/431960
+OUTPUT=$(niri msg outputs | grep -oP '\(\K[^)]+(?=\)$)' | head -1)
+```
 
+### 验证成功
+
+```bash
+niri msg layers | grep -A2 linux-wallpaperengine
+```
+
+期望：
+
+```
+Background layer:
+    Surface:
+      Namespace: "linux-wallpaperengine"
+```
+
+日志里应有 `VO: [libmpv] WxH ...` 表示解码成功。
+
+### 选壁纸：优先 scene
+
+```bash
+jq -r '.type' "$WORKSHOP/<id>/project.json"
+```
+
+| 类型 | 单核 CPU | 建议 |
+|---|---|---|
+| `scene` | 3-10% | **首选** |
+| `video` | 90-95%（软解） | 能接受再用 |
+
+## 路线 B：Wine 修复
+
+### 执行顺序
+
+```bash
+./scripts/diagnose.sh          # 先诊断
+./scripts/install.sh           # 再修
+```
+
+### 问题 B1：prefix 在 NTFS 上
+
+诊断信号：`compatdata` 在 `fuseblk`/`ntfs`/`ntfs3` 上，
+或 `dosdevices/c: 缺失或损坏`。
+
+```bash
+LIB=<库>/steamapps
+EXT4=$HOME/.local/share/Steam/steamapps   # 确认 ext4
 mkdir -p "$EXT4/compatdata"
-mv "$LIB/compatdata" "$LIB/compatdata_ntfs_old"   # 不删，只挪开
+mv "$LIB/compatdata" "$LIB/compatdata_ntfs_old"   # 不删，只挪
 ln -sfn "$EXT4/compatdata" "$LIB/compatdata"
 ```
 
-**注意**：`mv` 整个 compatdata 会影响该库所有游戏（它们的 prefix 同样不可用），
-这是期望行为。旧目录留着，用户确认一切正常后可自行删除。
+### 问题 B2：explorer.exe 不转发
 
-### 第 3 步：修问题 B（explorer 转发器）
+诊断信号：`仍是原版 Wine explorer.exe`，或 `wine start` 对任何路径都失败。
 
 ```bash
-sudo pacman -S mingw-w64-gcc          # 或对应发行版的 mingw 包
+sudo pacman -S mingw-w64-gcc
 x86_64-w64-mingw32-gcc -O2 -o explorer.exe src/explorer.c
 
 PREFIX="$LIB/compatdata/431960/pfx"
@@ -82,41 +131,45 @@ for d in "$PREFIX/drive_c/windows" "$PREFIX/drive_c/windows/system32"; do
     rm -f "$d/explorer.exe"
     cp explorer.exe "$d/explorer.exe"
 done
+WINEPREFIX="$PREFIX" wineserver -k
 ```
 
-### 第 4 步：写注册表关联
+## 关键约束（两条路线都适用）
 
-追加到 `$PREFIX/system.reg`（**不要**用 regedit）：
-
-```bash
-cat >> "$PREFIX/system.reg" <<'EOF'
-
-[Software\\Classes\\mp4file\\shell\\open\\command] 1700000000
-#time=1dd67daeaa56f7a
-@="\"C:\\windows\\system32\\winebrowser.exe\" \"%1\""
-
-[Software\\Classes\\.mp4] 1700000000
-#time=1dd67daeaa56f7a
-@="mp4file"
-"Content Type"="video/mp4"
-"PerceivedType"="video"
-EOF
-```
-
-`system.reg` 是文本格式，Wine 启动时读取。时间戳字段（`1700000000`）随意但必须存在。
-
-### 第 5 步：验证
-
-```bash
-WINEPREFIX="$PREFIX" wineserver -k    # 强制重载注册表
-
-# 启动 WE 后，在界面点「打开文件夹」，然后：
-cat "$PREFIX/drive_c/explorer-fwd.log"
-```
-
-期望看到 `CreateProcess=1 err=0`，且主机弹出文件管理器。
+1. **不要**假设用户环境与作者一致。先跑诊断，再动手。
+2. **不要**直接 `rm -rf` NTFS 上的 compatdata —— 含 Windows reparse point，
+   删除报 `Input/output error`。用 `mv` 改名挪开。
+3. **不要**用 `regedit /S` 写注册表。Proton prefix 下会**静默失败**
+   （exit 0 但没写入）。直接追加到 `system.reg`。
+4. **不要**改 Proton 安装目录里的文件。只改 `compatdata/<appid>/pfx/` 内的副本。
+5. 替换 `explorer.exe` 前**必须**用 `cp -P` 备份（原文件是符号链接）。
+6. **不要**建议用户换 X11 来让壁纸工作 —— X11 同样没有 `Progman`，一样不行。
+7. **不要**用 `pkill -f linux-wallpaperengine` 管理壁纸进程 —— 会匹配到自己的
+   命令行导致自杀。用 `ps -eo pid,args | grep -F` 精确定位。
 
 ## 常见失败模式
+
+### 壁纸进程在跑但屏幕没变化
+
+```bash
+niri msg layers | grep linux-wallpaperengine
+```
+
+- 无输出 → 少了 `--layer background`，或显示器名错
+- 有输出但看不见 → 检查 niri `layer-rule`，可能被其他 surface 盖住
+
+### 总览界面里壁纸重复
+
+少了 `--layer background` 或没配 `place-within-backdrop`。
+
+### 硬解失败
+
+```
+Device does not support the VK_KHR_video_decode_queue extension!
+CUDA_ERROR_OUT_OF_MEMORY
+```
+
+→ `--hwdec no`。若壁纸在 NTFS 上，硬解本来不可用。
 
 ### `wine start` 对任何路径都失败
 
@@ -125,57 +178,38 @@ ShellExecuteEx
 [exit: 1]
 ```
 
-连 `notepad.exe` 都启动不了 → Wine 的 `ShellExecuteExW` 在该 prefix 下整体失效。
-**这不是配置问题**，改注册表无效。必须走替换 `explorer.exe` 的路线。
-
-### 替换 explorer.exe 后出现 `ShellExecuteEx 失败: 找不到文件`
-
-Wine 内部某些操作依赖真正的 explorer。若出现此错误：
-
-1. 确认 `explorer.exe.wine-orig` 存在且是**符号链接**（`cp -P` 保留）
-2. 还原：`cp -P explorer.exe.wine-orig explorer.exe`
-3. 检查转发器是否至少能独立运行：
-   ```bash
-   WINEPREFIX="$PREFIX" wine 'C:\windows\system32\explorer.exe' '/n,/select,Z:\some\path'
-   ```
+连 `notepad.exe` 都启动不了 → Wine 的 `ShellExecuteExW` 整体失效。
+**不是配置问题**，改注册表无效。必须替换 `explorer.exe`。
 
 ### 转发器日志显示 `target=(empty)`
 
-参数解析失败。Wallpaper Engine 把 `/n,/select,<path>` 作为**单个参数**传入，
-不是拆开的。解析器必须在整串里 `strstr("/select,")`，不能只检查 argv[0]。
+参数解析失败。WE 把 `/n,/select,<path>` 作为**单个参数**传入，不是拆开的。
+解析器必须在整串里 `strstr("/select,")`。
 
 ### 界面启动但用户看不到
 
-平铺合成器（niri/sway/Hyprland）把窗口挤到屏幕外。检查：
+平铺合成器把窗口挤到屏幕外：
 
 ```bash
 niri msg windows | grep -A6 'Wallpaper UI'
 ```
 
-若 `Is floating: no`，让它浮动：
+若 `Is floating: no`：
 
 ```bash
 niri msg action move-window-to-floating --id <id>
 ```
 
-长期方案是在合成器配置里加窗口规则（见 README）。
-
-### 进程活着但 Steam 显示异常
-
-```bash
-pkill -x wallpaper64.exe
-WINEPREFIX="$PREFIX" wineserver -k
-```
-
 ## 不要做的事
 
-- 不要试图让壁纸渲染在 Wayland 下工作。WE 依赖 Windows DWM 桌面层，
-  XWayland 是 rootless 模式，没有该层。会卡在 `COMException`。界面能用就够了。
-- 不要建议用户格式化 NTFS 分区。双系统共用盘必须保留 NTFS。
+- 不要试图让壁纸在原版 WE（Wine）里工作。原理上不可能。
+- 不要建议用户格式化 NTFS 分区。双系统共用盘必须保留。
 - 不要安装 `keyd` 之类无关工具。
 - 不要在用户没要求时改动其他游戏的 prefix。
+- 不要向用户承诺「完整适配」。两条路线各有边界，说清楚。
 
 ## 已验证环境
 
 Arch Linux / kernel 7.2.11 / niri 26.04 (Wayland) / NVIDIA 615.78.08 /
-Proton Experimental 11.0 / 游戏库在 NTFS，prefix 在 ext4 / WE build 20000800000042
+Proton Experimental 11.0 / 游戏库在 NTFS，prefix 在 ext4 /
+WE build 20000800000042 / linux-wallpaperengine r643.a0ddce58
